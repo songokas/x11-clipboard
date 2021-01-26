@@ -317,4 +317,36 @@ impl Clipboard {
             Err(Error::Owner)
         }
     }
+
+    pub fn store_multiple<T: Into<Vec<u8>>>(&self, selection: Atom, targets: HashMap<Atom, T>)
+    -> Result<(), Error>
+{
+    self.send.send(selection)?;
+    {
+        let mut hash = self.setmap
+            .write()
+            .map_err(|_| Error::Lock)?;
+        for (target, value) in targets {
+            hash.insert(selection, (target, value.into()));
+        }
+    }
+
+    xcb::set_selection_owner(
+        &self.setter.connection,
+        self.setter.window, selection,
+        xcb::CURRENT_TIME
+    );
+
+    self.setter.connection.flush();
+
+    if xcb::get_selection_owner(&self.setter.connection, selection)
+        .get_reply()
+        .map(|reply| reply.owner() == self.setter.window)
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(Error::Owner)
+    }
+}
 }
