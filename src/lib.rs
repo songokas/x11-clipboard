@@ -14,7 +14,7 @@ use error::Error;
 
 pub const INCR_CHUNK_SIZE: usize = 4000;
 const POLL_DURATION: u64 = 50;
-type SetMap = Arc<RwLock<HashMap<Atom, (Atom, Vec<u8>)>>>;
+type SetMap = Arc<RwLock<HashMap<Atom, HashMap<Atom, Vec<u8>>>>>;
 
 #[derive(Clone, Debug)]
 pub struct Atoms {
@@ -294,10 +294,14 @@ impl Clipboard {
         -> Result<(), Error>
     {
         self.send.send(selection)?;
+
+        let mut hash = HashMap::new();
+        hash.insert(target, value.into());
+
         self.setmap
             .write()
             .map_err(|_| Error::Lock)?
-            .insert(selection, (target, value.into()));
+            .insert(selection, hash);
 
         xcb::set_selection_owner(
             &self.setter.connection,
@@ -319,34 +323,35 @@ impl Clipboard {
     }
 
     pub fn store_multiple<T: Into<Vec<u8>>>(&self, selection: Atom, targets: HashMap<Atom, T>)
-    -> Result<(), Error>
-{
-    self.send.send(selection)?;
-    {
-        let mut hash = self.setmap
-            .write()
-            .map_err(|_| Error::Lock)?;
+    -> Result<(), Error> {
+
+        self.send.send(selection)?;
+        let mut hash = HashMap::new();
         for (target, value) in targets {
-            hash.insert(selection, (target, value.into()));
+            hash.insert(target, value.into());
+        }
+
+        self.setmap
+        .write()
+        .map_err(|_| Error::Lock)?
+        .insert(selection, hash);
+
+        xcb::set_selection_owner(
+            &self.setter.connection,
+            self.setter.window, selection,
+            xcb::CURRENT_TIME
+        );
+
+        self.setter.connection.flush();
+
+        if xcb::get_selection_owner(&self.setter.connection, selection)
+            .get_reply()
+            .map(|reply| reply.owner() == self.setter.window)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        } else {
+            return Err(Error::Owner)
         }
     }
-
-    xcb::set_selection_owner(
-        &self.setter.connection,
-        self.setter.window, selection,
-        xcb::CURRENT_TIME
-    );
-
-    self.setter.connection.flush();
-
-    if xcb::get_selection_owner(&self.setter.connection, selection)
-        .get_reply()
-        .map(|reply| reply.owner() == self.setter.window)
-        .unwrap_or(false)
-    {
-        Ok(())
-    } else {
-        Err(Error::Owner)
-    }
-}
 }
