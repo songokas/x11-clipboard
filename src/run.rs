@@ -21,7 +21,7 @@ struct IncrState {
     pos: usize
 }
 
-pub fn run(context: &Arc<Context>, setmap: &SetMap, _max_length: usize, receiver: &Receiver<Atom>) {
+pub fn run(context: &Arc<Context>, setmap: &SetMap, max_length: usize, receiver: &Receiver<Atom>) {
     let mut incr_map = HashMap::new();
     let mut state_map = HashMap::new();
 
@@ -49,11 +49,15 @@ pub fn run(context: &Arc<Context>, setmap: &SetMap, _max_length: usize, receiver
                         &available_targets
                     );
                 } else if targets.contains_key(&event.target()) {
-                    //@TODO value.len() < max_length - 24
+                        
+                    let value = match targets.get(&event.target()) {
+                        Some(v) if v.len() < max_length - 24 => v,
+                        _ => continue
+                    };
                     xcb::change_property(
                         &context.connection, xcb::PROP_MODE_REPLACE as u8,
                         event.requestor(), event.property(), event.target(), 8,
-                        targets.get(&event.target()).unwrap()
+                        value
                     );
                 } else {
                     xcb::change_window_attributes(
@@ -88,36 +92,6 @@ pub fn run(context: &Arc<Context>, setmap: &SetMap, _max_length: usize, receiver
                         event.property()
                     )
                 );
-                context.connection.flush();
-            },
-            // @TODO
-            xcb::PROPERTY_NOTIFY => {
-
-                let event = unsafe { xcb::cast_event::<xcb::PropertyNotifyEvent>(&event) };
-                if event.state() != xcb::PROPERTY_DELETE as u8 { continue };
-
-                let is_end = {
-                    let state = try_continue!(state_map.get_mut(&event.atom()));
-                    let read_setmap = try_continue!(setmap.read().ok());
-                    let targets = try_continue!(read_setmap.get(&state.selection));
-
-                    let mut len = 0;
-
-                    for (target, value) in targets {
-                        len = cmp::min(INCR_CHUNK_SIZE, value.len() - state.pos);
-                        xcb::change_property(
-                            &context.connection, xcb::PROP_MODE_REPLACE as u8,
-                            state.requestor, state.property, *target, 8,
-                            &value[state.pos..][..len]
-                        );
-                        state.pos += len;
-                    }
-                    len == 0
-                };
-
-                if is_end {
-                    state_map.remove(&event.atom());
-                }
                 context.connection.flush();
             },
             xcb::SELECTION_CLEAR => {
