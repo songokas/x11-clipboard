@@ -1,4 +1,6 @@
-use error::Error;
+use crate::error::Error;
+use crate::{AtomEnum, EventMask};
+use crate::{Context, SetMap, INCR_CHUNK_SIZE};
 use std::cmp;
 use std::collections::HashMap;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -10,8 +12,6 @@ use x11rb::protocol::xproto::{
     Window, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
-use {AtomEnum, EventMask};
-use {Context, SetMap, INCR_CHUNK_SIZE};
 
 macro_rules! try_continue {
     ( $expr:expr ) => {
@@ -26,6 +26,7 @@ struct IncrState {
     selection: Atom,
     requestor: Window,
     property: Atom,
+    target: Atom,
     pos: usize,
 }
 
@@ -133,7 +134,7 @@ pub(crate) fn run(
             match event {
                 Event::SelectionRequest(event) => {
                     let read_map = try_continue!(setmap.read().ok());
-                    let &(target, ref value) = try_continue!(read_map.get(&event.selection));
+                    let targets = try_continue!(read_map.get(&event.selection));
 
                     if event.target == context.atoms.targets {
                         let _ = x11rb::wrapper::ConnectionExt::change_property32(
@@ -142,17 +143,23 @@ pub(crate) fn run(
                             event.requestor,
                             event.property,
                             Atom::from(AtomEnum::ATOM),
-                            &[context.atoms.targets, target],
+                            &[context.atoms.targets, event.target],
                         );
-                    } else if value.len() < max_length - 24 {
-                        let _ = x11rb::wrapper::ConnectionExt::change_property8(
-                            &context.connection,
-                            PropMode::REPLACE,
-                            event.requestor,
-                            event.property,
-                            target,
-                            value,
-                        );
+                    } else if targets.contains_key(&event.target) {
+                        match targets.get(&event.target) {
+                            Some(v) if v.len() < max_length - 24 => {
+                                let _ = x11rb::wrapper::ConnectionExt::change_property8(
+                                    &context.connection,
+                                    PropMode::REPLACE,
+                                    event.requestor,
+                                    event.property,
+                                    event.target,
+                                    v,
+                                );
+                            }
+                            Some(_) => (),
+                            None => {}
+                        }
                     } else {
                         let _ = context.connection.change_window_attributes(
                             event.requestor,
@@ -174,6 +181,7 @@ pub(crate) fn run(
                                 selection: event.selection,
                                 requestor: event.requestor,
                                 property: event.property,
+                                target: event.target,
                                 pos: 0,
                             },
                         );
@@ -202,7 +210,8 @@ pub(crate) fn run(
                     let is_end = {
                         let state = try_continue!(state_map.get_mut(&event.atom));
                         let read_setmap = try_continue!(setmap.read().ok());
-                        let &(target, ref value) = try_continue!(read_setmap.get(&state.selection));
+                        let targets = try_continue!(read_setmap.get(&state.selection));
+                        let value = try_continue!(targets.get(&state.target));
 
                         let len = cmp::min(INCR_CHUNK_SIZE, value.len() - state.pos);
                         let _ = x11rb::wrapper::ConnectionExt::change_property8(
@@ -210,7 +219,7 @@ pub(crate) fn run(
                             PropMode::REPLACE,
                             state.requestor,
                             state.property,
-                            target,
+                            state.target,
                             &value[state.pos..][..len],
                         );
                         state.pos += len;

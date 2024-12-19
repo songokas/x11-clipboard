@@ -25,7 +25,7 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME};
 
 pub const INCR_CHUNK_SIZE: usize = 4000;
 const POLL_DURATION: u64 = 50;
-type SetMap = Arc<RwLock<HashMap<Atom, (Atom, Vec<u8>)>>>;
+type SetMap = Arc<RwLock<HashMap<Atom, HashMap<Atom, Vec<u8>>>>>;
 
 #[derive(Clone, Debug)]
 pub struct Atoms {
@@ -414,10 +414,13 @@ impl Clipboard {
         value: T,
     ) -> Result<(), Error> {
         self.send.send(selection)?;
+        let mut hash = HashMap::new();
+        hash.insert(target, value.into());
+
         self.setmap
             .write()
             .map_err(|_| Error::Lock)?
-            .insert(selection, (target, value.into()));
+            .insert(selection, hash);
 
         self.setter
             .connection
@@ -444,12 +447,14 @@ impl Clipboard {
         targets: HashMap<Atom, T>,
     ) -> Result<(), Error> {
         self.send.send(selection)?;
-        {
-            let mut hash = self.setmap.write().map_err(|_| Error::Lock)?;
-            for (target, value) in targets {
-                hash.insert(selection, (target, value.into()));
-            }
+        let mut hash = HashMap::new();
+        for (target, value) in targets {
+            hash.insert(target, value.into());
         }
+        self.setmap
+            .write()
+            .map_err(|_| Error::Lock)?
+            .insert(selection, hash);
 
         self.setter
             .connection
