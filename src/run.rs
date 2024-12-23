@@ -130,61 +130,64 @@ pub(crate) fn run(
                     }
                 }
             }
-
             match event {
-                Event::SelectionRequest(event) => {
+                Event::SelectionRequest(mut event) => {
                     let read_map = try_continue!(setmap.read().ok());
                     let targets = try_continue!(read_map.get(&event.selection));
-
                     if event.target == context.atoms.targets {
+                        let all_targets: Vec<_> = targets
+                            .keys()
+                            .copied()
+                            .chain([context.atoms.targets])
+                            .collect();
                         let _ = x11rb::wrapper::ConnectionExt::change_property32(
                             &context.connection,
                             PropMode::REPLACE,
                             event.requestor,
                             event.property,
                             Atom::from(AtomEnum::ATOM),
-                            &[context.atoms.targets, event.target],
+                            &all_targets,
                         );
-                    } else if targets.contains_key(&event.target) {
-                        match targets.get(&event.target) {
-                            Some(v) if v.len() < max_length - 24 => {
+                    } else {
+                        if let Some(value) = targets.get(&event.target) {
+                            if value.len() < max_length - 24 {
                                 let _ = x11rb::wrapper::ConnectionExt::change_property8(
                                     &context.connection,
                                     PropMode::REPLACE,
                                     event.requestor,
                                     event.property,
                                     event.target,
-                                    v,
+                                    value,
+                                );
+                            } else {
+                                let _ = context.connection.change_window_attributes(
+                                    event.requestor,
+                                    &ChangeWindowAttributesAux::new()
+                                        .event_mask(EventMask::PROPERTY_CHANGE),
+                                );
+                                let _ = x11rb::wrapper::ConnectionExt::change_property32(
+                                    &context.connection,
+                                    PropMode::REPLACE,
+                                    event.requestor,
+                                    event.property,
+                                    context.atoms.incr,
+                                    &[0u32; 0],
+                                );
+                                incr_map.insert(event.selection, event.property);
+                                state_map.insert(
+                                    event.property,
+                                    IncrState {
+                                        selection: event.selection,
+                                        requestor: event.requestor,
+                                        property: event.property,
+                                        target: event.target,
+                                        pos: 0,
+                                    },
                                 );
                             }
-                            Some(_) => (),
-                            None => {}
+                        } else {
+                            event.target = Atom::from(AtomEnum::NONE);
                         }
-                    } else {
-                        let _ = context.connection.change_window_attributes(
-                            event.requestor,
-                            &ChangeWindowAttributesAux::new()
-                                .event_mask(EventMask::PROPERTY_CHANGE),
-                        );
-                        let _ = x11rb::wrapper::ConnectionExt::change_property32(
-                            &context.connection,
-                            PropMode::REPLACE,
-                            event.requestor,
-                            event.property,
-                            context.atoms.incr,
-                            &[0u32; 0],
-                        );
-                        incr_map.insert(event.selection, event.property);
-                        state_map.insert(
-                            event.property,
-                            IncrState {
-                                selection: event.selection,
-                                requestor: event.requestor,
-                                property: event.property,
-                                target: event.target,
-                                pos: 0,
-                            },
-                        );
                     }
                     let _ = context.connection.send_event(
                         false,

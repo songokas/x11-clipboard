@@ -75,8 +75,8 @@ pub struct Context {
 }
 
 #[inline]
-fn get_atom(connection: &RustConnection, name: &str) -> Result<Atom, Error> {
-    let intern_atom = connection.intern_atom(false, name.as_bytes())?;
+fn get_atom(connection: &RustConnection, name: &str, only_if_exists: bool) -> Result<Atom, Error> {
+    let intern_atom = connection.intern_atom(only_if_exists, name.as_bytes())?;
     let reply = intern_atom.reply().map_err(Error::XcbReply)?;
     Ok(reply.atom)
 }
@@ -120,8 +120,8 @@ impl Context {
         })
     }
 
-    pub fn get_atom(&self, name: &str) -> Result<Atom, Error> {
-        get_atom(&self.connection, name)
+    pub fn get_atom(&self, name: &str, only_if_exists: bool) -> Result<Atom, Error> {
+        get_atom(&self.connection, name, only_if_exists)
     }
 }
 
@@ -173,13 +173,7 @@ impl Clipboard {
         };
 
         loop {
-            if timeout
-                .into_iter()
-                .zip(start_time)
-                .next()
-                .map(|(timeout, time)| (Instant::now() - time) >= timeout)
-                .unwrap_or(false)
-            {
+            if matches!((timeout, start_time), (Some(t), Some(s)) if s.elapsed() > t ) {
                 return Err(Error::Timeout);
             }
 
@@ -193,7 +187,6 @@ impl Clipboard {
                     }
                 },
             };
-
             if seq < sequence_number {
                 continue;
             }

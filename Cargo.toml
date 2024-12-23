@@ -11,4 +11,4 @@ edition = "2021"
 
 [dependencies]
 libc = { version = "0.2.152" }
-x11rb = { version = "0.13.0", features = ["xfixes"] }
+x11rb = { version = "0.13.1", features = ["xfixes", "extra-traits"] }
