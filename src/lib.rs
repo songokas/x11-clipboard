@@ -437,17 +437,14 @@ impl Clipboard {
     pub fn store_multiple<T: Into<Vec<u8>>>(
         &self,
         selection: Atom,
-        targets: HashMap<Atom, T>,
+        targets: Vec<(Atom, T)>,
     ) -> Result<(), Error> {
         self.send.send(selection)?;
-        let mut hash = HashMap::new();
-        for (target, value) in targets {
-            hash.insert(target, value.into());
-        }
+        let targets = targets.into_iter().map(|(a, d)| (a, d.into())).collect();
         self.setmap
             .write()
             .map_err(|_| Error::Lock)?
-            .insert(selection, hash);
+            .insert(selection, targets);
 
         self.setter
             .connection
