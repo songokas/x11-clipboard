@@ -18,14 +18,15 @@ use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::errors::ConnectError;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, SelectionClearEvent,
+    WindowClass, SELECTION_CLEAR_EVENT,
 };
 use x11rb::protocol::{xfixes, Event};
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME};
 
 pub const INCR_CHUNK_SIZE: usize = 4000;
 const POLL_DURATION: u64 = 50;
-type SetMap = Arc<RwLock<HashMap<Atom, HashMap<Atom, Vec<u8>>>>>;
+type SetMap = Arc<RwLock<HashMap<Atom, Vec<(Atom, Vec<u8>)>>>>;
 
 #[derive(Clone, Debug)]
 pub struct Atoms {
@@ -74,13 +75,6 @@ pub struct Context {
     pub atoms: Atoms,
 }
 
-#[inline]
-fn get_atom(connection: &RustConnection, name: &str, only_if_exists: bool) -> Result<Atom, Error> {
-    let intern_atom = connection.intern_atom(only_if_exists, name.as_bytes())?;
-    let reply = intern_atom.reply().map_err(Error::XcbReply)?;
-    Ok(reply.atom)
-}
-
 impl Context {
     pub fn new(displayname: Option<&str>) -> Result<Self, Error> {
         let (connection, screen) = RustConnection::connect(displayname)?;
@@ -121,7 +115,17 @@ impl Context {
     }
 
     pub fn get_atom(&self, name: &str, only_if_exists: bool) -> Result<Atom, Error> {
-        get_atom(&self.connection, name, only_if_exists)
+        let intern_atom = self
+            .connection
+            .intern_atom(only_if_exists, name.as_bytes())?;
+        let reply = intern_atom.reply().map_err(Error::XcbReply)?;
+        Ok(reply.atom)
+    }
+
+    pub fn get_atom_name(&self, atom: Atom) -> Result<Vec<u8>, Error> {
+        let intern_atom = self.connection.get_atom_name(atom)?;
+        let reply = intern_atom.reply().map_err(Error::XcbReply)?;
+        Ok(reply.name)
     }
 }
 
@@ -131,7 +135,7 @@ impl Clipboard {
         let getter = Context::new(None)?;
         let setter = Arc::new(Context::new(None)?);
         let setter2 = Arc::clone(&setter);
-        let setmap = Arc::new(RwLock::new(HashMap::new()));
+        let setmap = Arc::new(RwLock::new(Default::default()));
         let setmap2 = Arc::clone(&setmap);
 
         let PipeDropFds {
@@ -151,147 +155,15 @@ impl Clipboard {
         })
     }
 
-    fn process_event<T>(
-        &self,
-        buff: &mut Vec<u8>,
-        selection: Atom,
-        target: Atom,
-        property: Atom,
-        timeout: T,
-        use_xfixes: bool,
-        sequence_number: u64,
-    ) -> Result<(), Error>
-    where
-        T: Into<Option<Duration>>,
-    {
-        let mut is_incr = false;
-        let timeout = timeout.into();
-        let start_time = if timeout.is_some() {
-            Some(Instant::now())
-        } else {
-            None
-        };
-
-        loop {
-            if matches!((timeout, start_time), (Some(t), Some(s)) if s.elapsed() > t ) {
-                return Err(Error::Timeout);
-            }
-
-            let (event, seq) = match use_xfixes {
-                true => self.getter.connection.wait_for_event_with_sequence()?,
-                false => match self.getter.connection.poll_for_event_with_sequence()? {
-                    Some(event) => event,
-                    None => {
-                        thread::park_timeout(Duration::from_millis(POLL_DURATION));
-                        continue;
-                    }
-                },
-            };
-            if seq < sequence_number {
-                continue;
-            }
-
-            match event {
-                Event::XfixesSelectionNotify(event) if use_xfixes => {
-                    self.getter
-                        .connection
-                        .convert_selection(
-                            self.getter.window,
-                            selection,
-                            target,
-                            property,
-                            event.timestamp,
-                        )?
-                        .check()?;
-                }
-                Event::SelectionNotify(event) => {
-                    if event.selection != selection {
-                        continue;
-                    };
-
-                    // Note that setting the property argument to None indicates that the
-                    // conversion requested could not be made.
-                    if event.property == Atom::from(AtomEnum::NONE) {
-                        break;
-                    }
-
-                    let reply = self
-                        .getter
-                        .connection
-                        .get_property(
-                            false,
-                            self.getter.window,
-                            event.property,
-                            AtomEnum::NONE,
-                            buff.len() as u32,
-                            u32::MAX,
-                        )?
-                        .reply()?;
-
-                    if reply.type_ == self.getter.atoms.incr {
-                        if let Some(mut value) = reply.value32() {
-                            if let Some(size) = value.next() {
-                                buff.reserve(size as usize);
-                            }
-                        }
-                        self.getter
-                            .connection
-                            .delete_property(self.getter.window, property)?
-                            .check()?;
-                        is_incr = true;
-                        continue;
-                    } else if reply.type_ != target {
-                        return Err(Error::UnexpectedType(reply.type_));
-                    }
-
-                    buff.extend_from_slice(&reply.value);
-                    break;
-                }
-
-                Event::PropertyNotify(event) if is_incr => {
-                    if event.state != Property::NEW_VALUE {
-                        continue;
-                    };
-
-                    let cookie = self.getter.connection.get_property(
-                        false,
-                        self.getter.window,
-                        property,
-                        AtomEnum::NONE,
-                        0,
-                        0,
-                    )?;
-
-                    let length = cookie.reply()?.bytes_after;
-
-                    let cookie = self.getter.connection.get_property(
-                        true,
-                        self.getter.window,
-                        property,
-                        AtomEnum::NONE,
-                        0,
-                        length,
-                    )?;
-                    let reply = cookie.reply()?;
-                    if reply.type_ != target {
-                        continue;
-                    };
-
-                    let value = reply.value;
-
-                    if !value.is_empty() {
-                        buff.extend_from_slice(&value);
-                    } else {
-                        break;
-                    }
-                }
-                _ => (),
-            }
-        }
-        Ok(())
-    }
-
-    /// load value.
+    /// load data
+    ///
+    /// # Arguments
+    ///
+    /// * timeout
+    ///
+    ///     Option::Some - do not poll above duration
+    ///     Option::None - poll until target appears
+    ///
     pub fn load<T>(
         &self,
         selection: Atom,
@@ -337,7 +209,8 @@ impl Clipboard {
         Ok(buff)
     }
 
-    /// wait for a new value and load it
+    /// load target value or wait until it exists
+    /// return if selection was updated (even if the target does not match)
     pub fn load_wait(
         &self,
         selection: Atom,
@@ -407,13 +280,10 @@ impl Clipboard {
         value: T,
     ) -> Result<(), Error> {
         self.send.send(selection)?;
-        let mut hash = HashMap::new();
-        hash.insert(target, value.into());
-
         self.setmap
             .write()
             .map_err(|_| Error::Lock)?
-            .insert(selection, hash);
+            .insert(selection, vec![(target, value.into())]);
 
         self.setter
             .connection
@@ -463,5 +333,194 @@ impl Clipboard {
         } else {
             Err(Error::Owner)
         }
+    }
+
+    pub fn list_target_names(
+        &self,
+        selection: Atom,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let output = self.load(
+            selection,
+            self.getter.atoms.targets,
+            self.getter.atoms.property,
+            timeout,
+        )?;
+        let atoms: Vec<u32> = output
+            .chunks(size_of::<u32>())
+            .filter_map(|b| Some(u32::from_ne_bytes(b.try_into().ok()?)))
+            .collect();
+        atoms
+            .into_iter()
+            .map(|atom| self.getter.get_atom_name(atom))
+            .collect()
+    }
+
+    pub fn clear(&self, selection: Atom) -> Result<(), Error> {
+        // clear writer
+        self.getter
+            .connection
+            .send_event(
+                false,
+                self.setter.window,
+                EventMask::default(),
+                SelectionClearEvent {
+                    response_type: SELECTION_CLEAR_EVENT,
+                    sequence: 0,
+                    time: CURRENT_TIME,
+                    owner: self.setter.window,
+                    selection,
+                },
+            )
+            .map_err(Error::XcbConnection)?;
+        self.getter
+            .connection
+            .flush()
+            .map_err(Error::XcbConnection)?;
+        self.setter
+            .connection
+            .set_selection_owner(self.setter.window, selection, CURRENT_TIME)?
+            .check()
+            .map_err(Error::XcbReply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_event<T>(
+        &self,
+        buff: &mut Vec<u8>,
+        selection: Atom,
+        target: Atom,
+        property: Atom,
+        timeout: T,
+        use_xfixes: bool,
+        sequence_number: u64,
+    ) -> Result<(), Error>
+    where
+        T: Into<Option<Duration>>,
+    {
+        let mut is_incr = false;
+        let timeout = timeout.into();
+        let mut start_time: Option<Instant> = None;
+
+        loop {
+            if matches!((timeout, start_time), (Some(t), Some(s)) if s.elapsed() > t ) {
+                return Err(Error::Timeout);
+            }
+            if timeout.is_some() && start_time.is_none() {
+                start_time = Some(Instant::now());
+            }
+
+            let (event, seq) = match use_xfixes {
+                true => self.getter.connection.wait_for_event_with_sequence()?,
+                false => match self.getter.connection.poll_for_event_with_sequence()? {
+                    Some(event) => event,
+                    None => {
+                        thread::park_timeout(Duration::from_millis(POLL_DURATION));
+                        continue;
+                    }
+                },
+            };
+            if seq < sequence_number {
+                continue;
+            }
+
+            match event {
+                Event::XfixesSelectionNotify(event) if use_xfixes => {
+                    self.getter
+                        .connection
+                        .convert_selection(
+                            self.getter.window,
+                            selection,
+                            target,
+                            property,
+                            event.timestamp,
+                        )?
+                        .check()?;
+                }
+                Event::SelectionNotify(event) => {
+                    if event.selection != selection {
+                        continue;
+                    };
+
+                    // Note that setting the property argument to None indicates that the
+                    // conversion requested could not be made.
+                    if event.property == Atom::from(AtomEnum::NONE) {
+                        break;
+                    }
+
+                    let reply = self
+                        .getter
+                        .connection
+                        .get_property(
+                            false,
+                            self.getter.window,
+                            event.property,
+                            AtomEnum::NONE,
+                            buff.len() as u32,
+                            u32::MAX,
+                        )?
+                        .reply()?;
+
+                    if reply.type_ == self.getter.atoms.incr {
+                        if let Some(mut value) = reply.value32() {
+                            if let Some(size) = value.next() {
+                                buff.reserve(size as usize);
+                            }
+                        }
+                        self.getter
+                            .connection
+                            .delete_property(self.getter.window, property)?
+                            .check()?;
+                        is_incr = true;
+                        continue;
+                    } else if reply.type_ != AtomEnum::ATOM.into() && reply.type_ != target {
+                        return Err(Error::UnexpectedType(reply.type_));
+                    }
+
+                    buff.extend_from_slice(&reply.value);
+                    break;
+                }
+
+                Event::PropertyNotify(event) if is_incr => {
+                    if event.state != Property::NEW_VALUE {
+                        continue;
+                    };
+
+                    let cookie = self.getter.connection.get_property(
+                        false,
+                        self.getter.window,
+                        property,
+                        AtomEnum::NONE,
+                        0,
+                        0,
+                    )?;
+
+                    let length = cookie.reply()?.bytes_after;
+
+                    let cookie = self.getter.connection.get_property(
+                        true,
+                        self.getter.window,
+                        property,
+                        AtomEnum::NONE,
+                        0,
+                        length,
+                    )?;
+                    let reply = cookie.reply()?;
+                    if reply.type_ != target {
+                        continue;
+                    };
+
+                    let value = reply.value;
+
+                    if !value.is_empty() {
+                        buff.extend_from_slice(&value);
+                    } else {
+                        break;
+                    }
+                }
+                _ => (),
+            }
+        }
+        Ok(())
     }
 }

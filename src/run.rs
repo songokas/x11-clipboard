@@ -133,13 +133,15 @@ pub(crate) fn run(
             match event {
                 Event::SelectionRequest(mut event) => {
                     let read_map = try_continue!(setmap.read().ok());
-                    let targets = try_continue!(read_map.get(&event.selection));
+                    let targets = read_map.get(&event.selection);
                     if event.target == context.atoms.targets {
-                        let all_targets: Vec<_> = targets
-                            .keys()
-                            .copied()
-                            .chain([context.atoms.targets])
-                            .collect();
+                        let mut all_targets = Vec::new();
+                        if let Some(t) = targets {
+                            if !t.is_empty() {
+                                all_targets.push(context.atoms.targets);
+                                all_targets.extend(t.iter().map(|(t, _)| *t))
+                            }
+                        };
                         let _ = x11rb::wrapper::ConnectionExt::change_property32(
                             &context.connection,
                             PropMode::REPLACE,
@@ -148,46 +150,47 @@ pub(crate) fn run(
                             Atom::from(AtomEnum::ATOM),
                             &all_targets,
                         );
-                    } else {
-                        if let Some(value) = targets.get(&event.target) {
-                            if value.len() < max_length - 24 {
-                                let _ = x11rb::wrapper::ConnectionExt::change_property8(
-                                    &context.connection,
-                                    PropMode::REPLACE,
-                                    event.requestor,
-                                    event.property,
-                                    event.target,
-                                    value,
-                                );
-                            } else {
-                                let _ = context.connection.change_window_attributes(
-                                    event.requestor,
-                                    &ChangeWindowAttributesAux::new()
-                                        .event_mask(EventMask::PROPERTY_CHANGE),
-                                );
-                                let _ = x11rb::wrapper::ConnectionExt::change_property32(
-                                    &context.connection,
-                                    PropMode::REPLACE,
-                                    event.requestor,
-                                    event.property,
-                                    context.atoms.incr,
-                                    &[0u32; 0],
-                                );
-                                incr_map.insert(event.selection, event.property);
-                                state_map.insert(
-                                    event.property,
-                                    IncrState {
-                                        selection: event.selection,
-                                        requestor: event.requestor,
-                                        property: event.property,
-                                        target: event.target,
-                                        pos: 0,
-                                    },
-                                );
-                            }
+                    } else if let Some(value) = targets.and_then(|t| {
+                        t.iter()
+                            .find_map(|(t, v)| (t == &event.target).then_some(v))
+                    }) {
+                        if value.len() < max_length - 24 {
+                            let _ = x11rb::wrapper::ConnectionExt::change_property8(
+                                &context.connection,
+                                PropMode::REPLACE,
+                                event.requestor,
+                                event.property,
+                                event.target,
+                                value,
+                            );
                         } else {
-                            event.target = Atom::from(AtomEnum::NONE);
+                            let _ = context.connection.change_window_attributes(
+                                event.requestor,
+                                &ChangeWindowAttributesAux::new()
+                                    .event_mask(EventMask::PROPERTY_CHANGE),
+                            );
+                            let _ = x11rb::wrapper::ConnectionExt::change_property32(
+                                &context.connection,
+                                PropMode::REPLACE,
+                                event.requestor,
+                                event.property,
+                                context.atoms.incr,
+                                &[0u32; 0],
+                            );
+                            incr_map.insert(event.selection, event.property);
+                            state_map.insert(
+                                event.property,
+                                IncrState {
+                                    selection: event.selection,
+                                    requestor: event.requestor,
+                                    property: event.property,
+                                    target: event.target,
+                                    pos: 0,
+                                },
+                            );
                         }
+                    } else {
+                        event.target = Atom::from(AtomEnum::NONE);
                     }
                     let _ = context.connection.send_event(
                         false,
@@ -214,7 +217,9 @@ pub(crate) fn run(
                         let state = try_continue!(state_map.get_mut(&event.atom));
                         let read_setmap = try_continue!(setmap.read().ok());
                         let targets = try_continue!(read_setmap.get(&state.selection));
-                        let value = try_continue!(targets.get(&state.target));
+                        let value = try_continue!(targets
+                            .iter()
+                            .find_map(|(t, v)| (t == &state.target).then_some(v)));
 
                         let len = cmp::min(INCR_CHUNK_SIZE, value.len() - state.pos);
                         let _ = x11rb::wrapper::ConnectionExt::change_property8(
